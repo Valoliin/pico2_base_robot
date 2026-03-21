@@ -27,4 +27,16 @@ void mks_set_emergency_stop(uint8_t *buffer, uint8_t addr);
 
 // Arrêt doux ou immédiat en mode vitesse (acc=0 -> immédiat, acc>0 -> décélération douce)
 void mks_set_stop(uint8_t *buffer, uint8_t addr, uint8_t acc);
+
+// Prépare la trame de calibration
+void mks_set_calibrate(uint8_t *buffer, uint8_t addr);
+
+// Lit le statut spécifique de la calibration (0=En cours, 1=Succès, 2=Échec, 255=Timeout)
+uint8_t mks_read_calib_status();
+
+// Initialise un paquet long (52 octets) rempli de zéros avec l'en-tête FC
+void mks_init_long_packet(uint8_t *long_buffer);
+
+// Injecte une commande standard dans un des 5 slots du paquet long
+void mks_add_to_long_packet(uint8_t *long_buffer, uint8_t slot, uint8_t *standard_frame, uint8_t frame_len);
 #endif

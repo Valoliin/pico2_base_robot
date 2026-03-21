@@ -52,3 +52,45 @@ mks_set_emergency_stop(ma_trame, 1);         // Prépare les 3 premiers octets
 ma_trame[3] = mks_get_checksum(ma_trame, 3); // Calcule le CRC sur 3 octets, index 3
 mks_send(ma_trame, 4);                       // Envoie la trame totale de 4 octets
 ```
+
+### 5. Calibration de l'encodeur (5 octets)
+Lance la procédure d'auto-calibration de l'encodeur magnétique pour le mode Closed-loop. 
+⚠️ **L'axe du moteur doit être libre de toute contrainte mécanique (pignon/courroie débranchés) pendant l'opération.**
+Paramètre : Adresse.
+```c
+mks_set_calibrate(ma_trame, 1);              // Prépare les 4 premiers octets
+ma_trame[4] = mks_get_checksum(ma_trame, 4); // Calcule le CRC sur 4 octets, index 4
+mks_send(ma_trame, 5);                       // Envoie la trame totale de 5 octets
+
+// Attente du statut avec une fonction dédiée (timeout très long de 10s)
+uint8_t status = mks_read_calib_status(); 
+// status : 0 = En cours, 1 = Succès, 2 = Échec (bloqué)
+```
+### 6. Commande Groupée Multi-Moteurs (Long Data Package - 52 octets)
+
+Permet d'envoyer des commandes simultanées jusqu'à 5 moteurs. La trame doit obligatoirement faire 52 octets, même si moins de 5 moteurs sont utilisés (les emplacements vides restent à zéro).
+⚠️  **Note : Les moteurs ne renvoient aucun accusé de réception (ACK) pour cette commande. **
+
+Exemple pour 3 moteurs :
+```c
+uint8_t trame_groupee[52];
+uint8_t cmd_m1[7], cmd_m2[7], cmd_m3[7];
+
+// 1. Initialise la trame avec des zéros et l'en-tête FC
+mks_init_long_packet(trame_groupee);
+
+// 2. Prépare les commandes individuelles (sans calculer leur CRC)
+mks_set_speed(cmd_m1, 1, 1, 30, 16); // Moteur 1
+mks_set_speed(cmd_m2, 2, 0, 30, 16); // Moteur 2
+mks_set_speed(cmd_m3, 3, 1, 15, 10); // Moteur 3
+
+// 3. Insère les commandes dans les emplacements (slots 0 à 4 possibles)
+mks_add_to_long_packet(trame_groupee, 0, cmd_m1, 6);
+mks_add_to_long_packet(trame_groupee, 1, cmd_m2, 6);
+mks_add_to_long_packet(trame_groupee, 2, cmd_m3, 6);
+
+// 4. Calcul du CRC global (sur 51 octets) et envoi
+trame_groupee[51] = mks_get_checksum(trame_groupee, 51);
+mks_send(trame_groupee, 52); 
+// Pas de mks_read_ack() !
+```
