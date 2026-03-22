@@ -1,4 +1,4 @@
-#include "mks_servo.h"
+#include "lib/mks_servo/mks_servo.h"
 #include <stdio.h>
 int main()
 {

@@ -34,11 +34,16 @@ project(robot C CXX ASM)
 pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
+set(SOURCES
+    src/robot.cpp
+    src/lib/mks_servo/mks_servo.c
+    src/lib/paa5100/pmw3901.cpp
+)
 
-add_executable(robot robot.c mks_servo.c)
+add_executable(robot ${SOURCES}) 
 
 pico_set_program_name(robot "robot")
-pico_set_program_version(robot "0.1")
+pico_set_program_version(robot "0.5")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(robot 0)
@@ -55,11 +60,6 @@ target_link_libraries(robot
 target_include_directories(robot PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
-
-# Add any user requested libraries
-target_link_libraries(robot 
-        hardware_spi
-        )
 
 pico_add_extra_outputs(robot)
 
