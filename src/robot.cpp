@@ -100,6 +100,14 @@ bool micro_ros_init_successful = false;
 extern float global_X, global_Y, global_Theta;
 
 // ============================================================================
+// MODE CALIBRATION DES CAPTEURS
+// ============================================================================
+#define CALIBRATION_MODE 1    // 1 = Calibration brute activée | 0 = Odométrie normale
+#define SENSOR_TO_CALIBRATE 1 // Choisir le capteur à observer : 1, 2 ou 3
+float calib_X = 0.0f;         // Accumulateur de ticks X
+float calib_Y = 0.0f;         // Accumulateur de ticks Y
+
+// ============================================================================
 // FONCTIONS UTILITAIRES
 // ============================================================================
 const uint LED_R = 28;
@@ -295,10 +303,26 @@ void core1_entry()
             capteur2.get_motion(dx2, dy2, 2);
             capteur3.get_motion(dx3, dy3, 2);
 
-            // 3. On prend le bâton de parole de l'Odométrie pour écrire les résultats
+#if CALIBRATION_MODE == 1
+            // MODE CALIBRATION : On additionne simplement les ticks bruts du capteur choisi
+            mutex_enter_blocking(&odom_mutex);
+#if SENSOR_TO_CALIBRATE == 1
+            calib_X += (float)dx1;
+            calib_Y += (float)dy1;
+#elif SENSOR_TO_CALIBRATE == 2
+            calib_X += (float)dx2;
+            calib_Y += (float)dy2;
+#elif SENSOR_TO_CALIBRATE == 3
+            calib_X += (float)dx3;
+            calib_Y += (float)dy3;
+#endif
+            mutex_exit(&odom_mutex);
+#else
+            // MODE NORMAL : On calcule la position globale (Odométrie)
             mutex_enter_blocking(&odom_mutex);
             updateOdometry(dx1, dy1, dx2, dy2, dx3, dy3);
             mutex_exit(&odom_mutex); // Libère l'odom
+#endif
         }
         sleep_ms(1); // Petite sieste de 1ms pour ne pas surchauffer le processeur
     }
@@ -381,9 +405,15 @@ int main()
             if (micro_ros_init_successful)
             {
                 mutex_enter_blocking(&odom_mutex); // On demande le bâton à notre Coeur 1
+#if CALIBRATION_MODE == 1
+                odom_simple_msg.x = calib_X;
+                odom_simple_msg.y = calib_Y;
+                odom_simple_msg.z = 0.0f; // La rotation n'est pas mesurée en calibration brute
+#else
                 odom_simple_msg.x = global_X;
                 odom_simple_msg.y = global_Y;
                 odom_simple_msg.z = global_Theta;
+#endif
                 mutex_exit(&odom_mutex);
 
                 // On envoie le message sur le réseau ROS !

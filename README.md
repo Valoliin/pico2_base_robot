@@ -53,6 +53,31 @@ La LED RGB intégrée au Pico 2 indique l'état en temps réel du robot :
 
 ---
 
+## 🎯 Calibration de l'Odométrie (Capteurs PAA5100)
+
+Pour que l'odométrie soit précise en mètres, il faut calibrer les constantes des capteurs (`C1`, `C2`, `C3` dans `odom.cpp`). Un mode de calibration brute a été prévu dans le code pour faciliter cette étape.
+
+**Procédure pas à pas :**
+
+1. Dans le fichier `src/robot.cpp`, modifiez les constantes au début du fichier :
+   ```cpp
+   #define CALIBRATION_MODE 1       // Active la remontée des ticks bruts
+   #define SENSOR_TO_CALIBRATE 1    // Choisissez le capteur à tester (1, 2 ou 3)
+   ```
+2. Compilez et flashez le Pico 2.
+3. Lancez l'agent micro-ROS sur la Pi 5 et écoutez le topic d'odométrie :
+   ```bash
+   ros2 topic echo /pico/odom_simple
+   ```
+4. Placez le robot le long d'une règle et **poussez-le bien droit sur exactement 500 mm (0.5 m)**.
+5. Relevez la valeur finale de `x` ou `y` affichée dans le terminal (c'est le nombre de "ticks" bruts accumulés par le capteur).
+6. Calculez votre nouveau coefficient : `C = 0.500 / Valeur_Lue`.
+7. Mettez à jour la variable `C1`, `C2` ou `C3` dans `src/odom.cpp`.
+8. Recommencez pour les autres capteurs en changeant le numéro `SENSOR_TO_CALIBRATE`.
+9. Une fois terminé, remettez `#define CALIBRATION_MODE 0` et reflashez pour réactiver les mathématiques d'odométrie du robot en mode normal !
+
+---
+
 ## 📌 Fonctionnalités bas niveau (API C MKS SERVO)
 
 Cette bibliothèque décompose la logique de communication pour offrir un contrôle total sur l'assemblage et l'envoi des trames :
