@@ -115,6 +115,7 @@ namespace pimoroni
   class PAA5100 : public PMW3901
   {
   public:
+    using PMW3901::PMW3901; // Inherit constructors
     virtual ~PAA5100() {}
 
   protected:

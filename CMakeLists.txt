@@ -38,6 +38,8 @@ set(SOURCES
     src/robot.cpp
     src/lib/mks_servo/mks_servo.c
     src/lib/paa5100/pmw3901.cpp
+    src/odom.cpp
+    src/pico_uart_transport.c
 )
 
 add_executable(robot ${SOURCES}) 
@@ -54,12 +56,24 @@ target_link_libraries(robot
         pico_stdlib
         hardware_spi
         hardware_uart
+        hardware_clocks
+        pico_multicore
+        ${CMAKE_CURRENT_SOURCE_DIR}/libmicroros/libmicroros.a
+        
 )
 
 # Add the standard include files to the build
 target_include_directories(robot PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/libmicroros/include
         ${CMAKE_CURRENT_LIST_DIR}
 )
-
+# On force l'UART0 sur les pins GP0 et GP1 (Broches physiques 1 et 2)
+target_compile_definitions(robot PRIVATE
+    PICO_DEFAULT_UART=0
+    PICO_DEFAULT_UART_TX_PIN=12
+    PICO_DEFAULT_UART_RX_PIN=13
+    MICRO_ROS_TRANSPORT_UART=uart0
+)
 pico_add_extra_outputs(robot)
 
