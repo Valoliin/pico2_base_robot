@@ -1,9 +1,59 @@
-# Contrôleur Robot - Raspberry Pi Pico 2
+# Contrôleur Robot - Raspberry Pi Pico 2 & ROS 2 (Micro-ROS)
 
 Une bibliothèque C modulaire et robuste pour piloter les moteurs pas-à-pas en boucle fermée **MKS SERVO42E** via une liaison RS485 (module MAX3485) depuis une Raspberry Pi Pico 2 et trois paa5100je pour génerer une odométrie.
+Le système communique désormais de manière autonome et asynchrone avec un Raspberry Pi 5 via **Micro-ROS**, en utilisant les deux cœurs du Pico 2 pour garantir des performances temps réel.
 
+---
 
-## 📌 Fonctionnalités actuelles
+## 🚀 Interface ROS 2 (Micro-ROS)
+
+Le Pico 2 exécute un nœud Micro-ROS nommé `pico_robot_node`.
+
+### 1. Démarrer l'Agent sur le Raspberry Pi 5
+Le Pico communique en série (UART0) sur les broches TX: 12 et RX: 13.
+Pour établir la communication, lancez l'agent Micro-ROS sur le Pi 5 avec la commande suivante :
+```bash
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyAMA0 -b 115200
+```
+*Note : Le Pico 2 se reconnectera automatiquement en cas de perte de l'agent.*
+
+### 2. Les Topics disponibles
+
+| Nom du Topic        | Type de Message             | Sens  | Description                                                        |
+| ------------------- | --------------------------- | ----- | ------------------------------------------------------------------ |
+| `/pico/cmd_simple`  | `geometry_msgs/msg/Point32` | 📥 Sub | Consigne de vitesse (RPM). `x` = Avant, `y` = Gauche, `z` = Droit. |
+| `/pico/odom_simple` | `geometry_msgs/msg/Point32` | 📤 Pub | Odométrie (à 50 Hz). `x` = Pos X, `y` = Pos Y, `z` = Angle Theta.  |
+
+### 3. Sécurité (Timeouts) ⚠️
+Le robot possède un chien de garde (Watchdog) matériel strict pour éviter les accidents :
+* **0.5 seconde sans message** : Freinage actif (Vitesse = 0, couple maintenu).
+* **10 secondes sans message** : Coupure de l'énergie (Roue libre pour économiser la batterie).
+👉 Il est donc **impératif de publier la consigne en continu** (par exemple à 10 Hz) pour faire rouler le robot.
+
+### 4. Commandes de Test depuis le terminal (Pi 5)
+
+**Faire tourner les moteurs (Publication à 10 Hz grâce à `-r 10`) :**
+```bash
+ros2 topic pub -r 10 /pico/cmd_simple geometry_msgs/msg/Point32 "{x: 50.0, y: -50.0, z: 0.0}"
+```
+*Pour stopper le robot, faites `Ctrl+C`. Le timeout de sécurité coupera les moteurs 500ms plus tard.*
+
+**Lire la position calculée par les capteurs optiques :**
+```bash
+ros2 topic echo /pico/odom_simple
+```
+
+### 5. Codes Couleur de la LED (Statut)
+La LED RGB intégrée au Pico 2 indique l'état en temps réel du robot :
+* 🔴 **Rouge** : Démarrage et initialisation.
+* 🟪 **Violet** : Moteurs RS485 configurés.
+* 🟨 **Jaune** : En attente de l'Agent Micro-ROS (Recherche de la Pi 5).
+* 🟩 **Vert** : Connecté à ROS 2, prêt à recevoir des ordres !
+* 🟦 **Bleu (Flash)** : Réception et exécution d'une commande de vitesse en cours.
+
+---
+
+## 📌 Fonctionnalités bas niveau (API C MKS SERVO)
 
 Cette bibliothèque décompose la logique de communication pour offrir un contrôle total sur l'assemblage et l'envoi des trames :
 * **Vitesse et Direction** (Commande `F6`) avec gestion de l'accélération.
