@@ -23,6 +23,7 @@ ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyAMA0 -b 115200
 | ------------------- | --------------------------- | ----- | ------------------------------------------------------------------ |
 | `/pico/cmd_simple`  | `geometry_msgs/msg/Point32` | 📥 Sub | Consigne de vitesse (RPM). `x` = Avant, `y` = Gauche, `z` = Droit. |
 | `/pico/odom_simple` | `geometry_msgs/msg/Point32` | 📤 Pub | Odométrie (à 50 Hz). `x` = Pos X, `y` = Pos Y, `z` = Angle Theta.  |
+| `/pico/reset_odom`  | `std_msgs/msg/Empty`        | 📥 Sub | Remet l'odométrie (X, Y, Theta) à zéro.                            |
 
 ### 3. Sécurité (Timeouts) ⚠️
 Le robot possède un chien de garde (Watchdog) matériel strict pour éviter les accidents :
@@ -43,6 +44,12 @@ ros2 topic pub -r 10 /pico/cmd_simple geometry_msgs/msg/Point32 "{x: 50.0, y: -5
 ros2 topic echo /pico/odom_simple
 ```
 
+**Remettre l'odométrie à zéro :**
+```bash
+ros2 topic pub --once /pico/reset_odom std_msgs/msg/Empty 
+```
+
+---
 ### 5. Codes Couleur de la LED (Statut)
 La LED RGB intégrée au Pico 2 indique l'état en temps réel du robot :
 * 🔴 **Rouge** : Démarrage et initialisation.
@@ -55,26 +62,93 @@ La LED RGB intégrée au Pico 2 indique l'état en temps réel du robot :
 
 ## 🎯 Calibration de l'Odométrie (Capteurs PAA5100)
 
-Pour que l'odométrie soit précise en mètres, il faut calibrer les constantes des capteurs (`C1`, `C2`, `C3` dans `odom.cpp`). Un mode de calibration brute a été prévu dans le code pour faciliter cette étape.
+Pour que l'odométrie soit précise, il est crucial de calibrer deux types de paramètres :
+1.  **Les constantes de conversion (`C1`, `C2`, `C3`)** : Elles transforment les "ticks" bruts de chaque capteur en mètres.
+2.  **Le rayon du robot (`R_ROBOT`)** : Il est utilisé pour calculer la rotation à partir des déplacements des capteurs.
 
-**Procédure pas à pas :**
+La calibration se fait en deux étapes principales.
 
-1. Dans le fichier `src/robot.cpp`, modifiez les constantes au début du fichier :
-   ```cpp
-   #define CALIBRATION_MODE 1       // Active la remontée des ticks bruts
-   #define SENSOR_TO_CALIBRATE 1    // Choisissez le capteur à tester (1, 2 ou 3)
-   ```
-2. Compilez et flashez le Pico 2.
-3. Lancez l'agent micro-ROS sur la Pi 5 et écoutez le topic d'odométrie :
-   ```bash
-   ros2 topic echo /pico/odom_simple
-   ```
-4. Placez le robot le long d'une règle et **poussez-le bien droit sur exactement 500 mm (0.5 m)**.
-5. Relevez la valeur finale de `x` ou `y` affichée dans le terminal (c'est le nombre de "ticks" bruts accumulés par le capteur).
-6. Calculez votre nouveau coefficient : `C = 0.500 / Valeur_Lue`.
-7. Mettez à jour la variable `C1`, `C2` ou `C3` dans `src/odom.cpp`.
-8. Recommencez pour les autres capteurs en changeant le numéro `SENSOR_TO_CALIBRATE`.
-9. Une fois terminé, remettez `#define CALIBRATION_MODE 0` et reflashez pour réactiver les mathématiques d'odométrie du robot en mode normal !
+### Étape 1 : Calibration des Constantes de Conversion (`C1`, `C2`, `C3`)
+
+Cette étape utilise le mode de diagnostic pour obtenir les lectures brutes des capteurs.
+
+1.  **Activation du mode diagnostic :**
+    *   Dans le fichier `src/robot.cpp`, modifiez la constante pour activer le mode de calibration :
+        ```bash
+        #define CALIBRATION_MODE 1
+        ```
+    *   Compilez et flashez le code sur le Pico.
+
+2.  **Mesure des ticks :**
+    *   Lancez l'agent micro-ROS sur la Pi 5.
+    *   Placez le robot sur une surface texturée, le long d'une règle.
+    *   Écoutez les topics des capteurs pour voir les ticks bruts s'accumuler :
+        ```bash
+        ros2 topic echo /pico/capteur1
+        ros2 topic echo /pico/capteur2
+        ros2 topic echo /pico/capteur3
+        ```
+    *   Remettez les compteurs à zéro :
+        ```bash
+        ros2 topic pub --once /pico/reset_odom std_msgs/msg/Empty
+        ```
+    *   **Poussez le robot bien droit sur une distance connue**, par exemple **500 mm (0.5 m)**. Essayez de le pousser dans une direction qui correspond à l'axe `y` (tangentiel) des capteurs.
+    *   Notez la valeur finale des ticks accumulés pour chaque capteur (par exemple, la valeur `y` du message `Point32`). Soit `ticks_capteur1`, `ticks_capteur2`, `ticks_capteur3`.
+
+3.  **Calcul et mise à jour des constantes :**
+    *   Calculez les constantes de conversion (mètres par tick) avec la formule :
+        `C_nouveau = distance_reelle_en_metres / ticks_lus`
+    *   Par exemple :
+        `C1 = 0.5 / ticks_capteur1`
+        `C2 = 0.5 / ticks_capteur2`
+        `C3 = 0.5 / ticks_capteur3`
+    *   Ouvrez le fichier `src/odom.cpp` et mettez à jour les valeurs des constantes `C1`, `C2`, `C3` avec les résultats de vos calculs.
+
+### Étape 1.5 (Optionnel) : Vérification des constantes et de l'orientation
+
+Ce mode permet de vérifier que les constantes `C` sont correctes et que les capteurs sont bien orientés.
+
+1.  **Activation du mode de vérification :**
+    *   Dans `src/robot.cpp`, passez au mode 2 : `#define CALIBRATION_MODE 2`
+    *   Compilez et flashez le code.
+
+2.  **Test de déplacement :**
+    *   Poussez le robot en ligne droite sur une distance connue (ex: 50 cm).
+    *   Écoutez les topics des capteurs : `ros2 topic echo /pico/capteur2`.
+    *   La valeur `y` (ou `x` selon l'orientation) devrait correspondre à la distance parcourue en mètres (ex: `0.5`).
+    *   Si une valeur est négative alors qu'elle devrait être positive, mettez le flag `invert_dx` ou `invert_dy` correspondant à `true` dans `src/odom.cpp` et recompilez.
+    *   Ce mode est très utile pour s'assurer que tous les capteurs "voient" le mouvement dans le bon sens avant de passer à l'odométrie complète.
+
+### Étape 2 : Calibration de la Rotation (`R_ROBOT`)
+
+Maintenant que les capteurs mesurent correctement les distances, nous pouvons calibrer la rotation.
+
+1.  **Retour au mode normal :**
+    *   Dans `src/robot.cpp`, désactivez le mode de calibration :
+        ```cpp
+        #define CALIBRATION_MODE 0
+        ```
+    *   Recompilez et flashez le code.
+
+2.  **Mesure de la rotation :**
+    *   Écoutez le topic d'odométrie final :
+        ```bash
+        ros2 topic echo /pico/odom_simple
+        ```
+    *   Remettez l'odométrie à zéro :
+        ```bash
+        ros2 topic pub --once /pico/reset_odom std_msgs/msg/Empty
+        ```
+    *   **Faites pivoter le robot sur lui-même d'un nombre de tours connu**, par exemple 10 tours complets.
+    *   Notez l'angle final `z` (theta) affiché par le topic `/pico/odom_simple`. C'est votre `Angle_Mesuré`.
+
+3.  **Calcul et mise à jour du rayon :**
+    *   Calculez l'angle théorique que vous auriez dû obtenir. Pour 10 tours : `Angle_Théorique = 10 * 2 * PI` (environ `62.83` radians).
+    *   Ajustez la valeur de `R_ROBOT` dans `src/odom.cpp` avec la formule :
+        `R_ROBOT_nouveau = R_ROBOT_actuel * (Angle_Mesuré / Angle_Théorique)`
+    *   Si la calibration n'est pas parfaite, vous pouvez recompiler et répéter l'étape 2 pour affiner la valeur.
+
+Une fois ces deux étapes terminées, votre odométrie devrait être bien calibrée !
 
 ---
 

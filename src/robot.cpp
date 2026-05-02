@@ -22,6 +22,7 @@
 #include <rclc/executor.h>
 #include <rmw_microros/rmw_microros.h>
 #include <geometry_msgs/msg/point32.h>
+#include <std_msgs/msg/empty.h>
 
 extern "C"
 {
@@ -39,19 +40,24 @@ using namespace pimoroni;
 // Les broches (pins) pour communiquer avec les capteurs optiques en SPI
 const uint PIN_SCK = 18, PIN_MOSI = 19, PIN_MISO = 20;
 // Création de nos 3 capteurs "souris" qui regardent le sol
-PAA5100 capteur1(spi0, 21, PIN_SCK, PIN_MOSI, PIN_MISO, 22);
-PAA5100 capteur2(spi0, 17, PIN_SCK, PIN_MOSI, PIN_MISO, 16);
+PAA5100 capteur2(spi0, 21, PIN_SCK, PIN_MOSI, PIN_MISO, 22);
+PAA5100 capteur1(spi0, 17, PIN_SCK, PIN_MOSI, PIN_MISO, 16);
 PAA5100 capteur3(spi0, 15, PIN_SCK, PIN_MOSI, PIN_MISO, 14);
+
+// ============================================================================
+// MODE DIAGNOSTIC UART
+// ============================================================================
+#define DEBUG_UART 0 // Mettre à 1 pour activer le test UART bloquant au démarrage
 
 // ==========================================
 // CONFIGURATION MODULAIRE
 // ==========================================
 // ============================================================================
-// 2. CONFIGURATION DES MOTEURS
+// 2. CONFIGURATION DES MOTEURS<
 // ============================================================================
 // Les "noms" (adresses) de nos moteurs sur le câble RS485
-uint8_t ID_MOT_AVANT = 1;
-uint8_t ID_MOT_GAUCHE = 2;
+uint8_t ID_MOT_AVANT = 2;
+uint8_t ID_MOT_GAUCHE = 1;
 uint8_t ID_MOT_DROIT = 3;
 
 // Si on monte un moteur à l'envers mécaniquement, on met "true" ici pour corriger
@@ -84,10 +90,27 @@ const float MAX_SPEED_RPM = 100.0f;         // Vitesse maximale autorisée (Séc
 // ============================================================================
 // 3. VARIABLES MICRO-ROS (LA COMMUNICATION AVEC LA PI 5)
 // ============================================================================
+
+// --- Déclaration des publishers en fonction du mode ---
+#define CALIBRATION_MODE 0    // 0 = Odométrie | 1 = Ticks Bruts | 2 = Ticks en Mètres
+
 rcl_subscription_t cmd_vel_subscriber;
 geometry_msgs__msg__Point32 cmd_vel_msg;
+
+#if CALIBRATION_MODE > 0 // Modes 1 et 2
+rcl_publisher_t calib_publisher1;
+rcl_publisher_t calib_publisher2;
+rcl_publisher_t calib_publisher3;
+geometry_msgs__msg__Point32 calib_msg1;
+geometry_msgs__msg__Point32 calib_msg2;
+geometry_msgs__msg__Point32 calib_msg3;
+#else // Mode 0
 rcl_publisher_t odom_simple_publisher;
 geometry_msgs__msg__Point32 odom_simple_msg;
+#endif
+
+rcl_subscription_t reset_odom_subscriber;
+std_msgs__msg__Empty reset_odom_msg;
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -102,11 +125,17 @@ extern float global_X, global_Y, global_Theta;
 // ============================================================================
 // MODE CALIBRATION DES CAPTEURS
 // ============================================================================
-#define CALIBRATION_MODE 1    // 1 = Calibration brute activée | 0 = Odométrie normale
-#define SENSOR_TO_CALIBRATE 1 // Choisir le capteur à observer : 1, 2 ou 3
-float calib_X = 0.0f;         // Accumulateur de ticks X
-float calib_Y = 0.0f;         // Accumulateur de ticks Y
-
+#if CALIBRATION_MODE == 1
+// Accumulateurs de ticks bruts pour chaque capteur
+volatile float calib_X1 = 0.0f, calib_Y1 = 0.0f;
+volatile float calib_X2 = 0.0f, calib_Y2 = 0.0f;
+volatile float calib_X3 = 0.0f, calib_Y3 = 0.0f;
+#elif CALIBRATION_MODE == 2
+// Accumulateurs de déplacement en mètres pour chaque capteur
+volatile float calib_mX1 = 0.0f, calib_mY1 = 0.0f;
+volatile float calib_mX2 = 0.0f, calib_mY2 = 0.0f;
+volatile float calib_mX3 = 0.0f, calib_mY3 = 0.0f;
+#endif
 // ============================================================================
 // FONCTIONS UTILITAIRES
 // ============================================================================
@@ -215,6 +244,33 @@ void cmd_vel_callback(const void *msgin)
 
 /**
  * ============================================================================
+ * RÉINITIALISATION DE L'ODOMÉTRIE
+ * ============================================================================
+ * Cette fonction s'active à la réception d'un message sur '/pico/reset_odom'.
+ */
+void reset_odom_callback(const void *msgin)
+{
+    // On prend le Mutex pour ne pas modifier pendant que le Coeur 1 calcule
+    mutex_enter_blocking(&odom_mutex);
+#if CALIBRATION_MODE == 1
+    calib_X1 = 0.0f; calib_Y1 = 0.0f; calib_X2 = 0.0f;
+    calib_Y2 = 0.0f; calib_X3 = 0.0f; calib_Y3 = 0.0f;
+#elif CALIBRATION_MODE == 2
+    calib_mX1 = 0.0f; calib_mY1 = 0.0f;
+    calib_mX2 = 0.0f; calib_mY2 = 0.0f;
+    calib_mX3 = 0.0f; calib_mY3 = 0.0f;
+#else
+    global_X = 0.0f;
+    global_Y = 0.0f;
+    global_Theta = 0.0f;
+#endif
+    mutex_exit(&odom_mutex);
+
+    set_rgb(0, 1, 1); // Clignotement Cyan pour confirmer la remise à zéro
+}
+
+/**
+ * ============================================================================
  * BRANCHER LE TÉLÉPHONE : INITIALISATION MICRO-ROS
  * ============================================================================
  * Prépare tout le nécessaire pour discuter avec le "grand" réseau ROS 2.
@@ -237,16 +293,34 @@ bool create_entities()
     if (rc != RCL_RET_OK)
         return false;
 
+#if CALIBRATION_MODE > 0
+    rc = rclc_publisher_init_default(&calib_publisher1, &node, type_support, "pico/capteur1");
+    if (rc != RCL_RET_OK) return false;
+    rc = rclc_publisher_init_default(&calib_publisher2, &node, type_support, "pico/capteur2");
+    if (rc != RCL_RET_OK) return false;
+    rc = rclc_publisher_init_default(&calib_publisher3, &node, type_support, "pico/capteur3");
+    if (rc != RCL_RET_OK) return false;
+#else
     rc = rclc_publisher_init_default(&odom_simple_publisher, &node, type_support, "pico/odom_simple");
+    if (rc != RCL_RET_OK)
+        return false;
+#endif
+    auto empty_type_support = ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Empty);
+    rc = rclc_subscription_init_default(&reset_odom_subscriber, &node, empty_type_support, "pico/reset_odom");
     if (rc != RCL_RET_OK)
         return false;
 
     executor = rclc_executor_get_zero_initialized_executor();
-    rc = rclc_executor_init(&executor, &support.context, 1, &allocator);
+    // L'exécuteur doit maintenant surveiller 2 abonnements (cmd_simple et reset_odom)
+    rc = rclc_executor_init(&executor, &support.context, 2, &allocator);
     if (rc != RCL_RET_OK)
         return false;
 
     rc = rclc_executor_add_subscription(&executor, &cmd_vel_subscriber, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA);
+    if (rc != RCL_RET_OK)
+        return false;
+
+    rc = rclc_executor_add_subscription(&executor, &reset_odom_subscriber, &reset_odom_msg, &reset_odom_callback, ON_NEW_DATA);
     if (rc != RCL_RET_OK)
         return false;
 
@@ -262,8 +336,15 @@ void destroy_entities()
     rmw_context_t *rmw_context = rcl_context_get_rmw_context(&support.context);
     (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
+#if CALIBRATION_MODE > 0
+    rcl_publisher_fini(&calib_publisher1, &node);
+    rcl_publisher_fini(&calib_publisher2, &node);
+    rcl_publisher_fini(&calib_publisher3, &node);
+#else
     rcl_publisher_fini(&odom_simple_publisher, &node);
+#endif
     rcl_subscription_fini(&cmd_vel_subscriber, &node);
+    rcl_subscription_fini(&reset_odom_subscriber, &node);
     rclc_executor_fini(&executor);
     rcl_node_fini(&node);
     rclc_support_fini(&support);
@@ -304,18 +385,31 @@ void core1_entry()
             capteur3.get_motion(dx3, dy3, 2);
 
 #if CALIBRATION_MODE == 1
-            // MODE CALIBRATION : On additionne simplement les ticks bruts du capteur choisi
+            // MODE CALIBRATION : On additionne simplement les ticks bruts de chaque capteur
             mutex_enter_blocking(&odom_mutex);
-#if SENSOR_TO_CALIBRATE == 1
-            calib_X += (float)dx1;
-            calib_Y += (float)dy1;
-#elif SENSOR_TO_CALIBRATE == 2
-            calib_X += (float)dx2;
-            calib_Y += (float)dy2;
-#elif SENSOR_TO_CALIBRATE == 3
-            calib_X += (float)dx3;
-            calib_Y += (float)dy3;
-#endif
+            calib_X1 += (float)(invert_dx1 ? -dx1 : dx1);
+            calib_Y1 += (float)(invert_dy1 ? -dy1 : dy1);
+            calib_X2 += (float)(invert_dx2 ? -dx2 : dx2);
+            calib_Y2 += (float)(invert_dy2 ? -dy2 : dy2);
+            calib_X3 += (float)(invert_dx3 ? -dx3 : dx3);
+            calib_Y3 += (float)(invert_dy3 ? -dy3 : dy3);
+            mutex_exit(&odom_mutex);
+#elif CALIBRATION_MODE == 2
+            // MODE VÉRIFICATION : On convertit les ticks en mètres pour chaque capteur
+            float mx1 = C1 * (float)(invert_dx1 ? -dx1 : dx1);
+            float my1 = C1 * (float)(invert_dy1 ? -dy1 : dy1);
+            float mx2 = C2 * (float)(invert_dx2 ? -dx2 : dx2);
+            float my2 = C2 * (float)(invert_dy2 ? -dy2 : dy2);
+            float mx3 = C3 * (float)(invert_dx3 ? -dx3 : dx3);
+            float my3 = C3 * (float)(invert_dy3 ? -dy3 : dy3);
+
+            mutex_enter_blocking(&odom_mutex);
+            calib_mX1 += mx1;
+            calib_mY1 += my1;
+            calib_mX2 += mx2;
+            calib_mY2 += my2;
+            calib_mX3 += mx3;
+            calib_mY3 += my3;
             mutex_exit(&odom_mutex);
 #else
             // MODE NORMAL : On calcule la position globale (Odométrie)
@@ -341,6 +435,32 @@ int main()
     // Initialisation de la carte Pico et des périphériques
     stdio_init_all();
     sleep_ms(2000);
+
+#if DEBUG_UART == 1
+    printf("--- Test de diagnostic UART du Pico 2 ---\n");
+    
+    // Configuration de l'UART0 sur les broches GP0 et GP1 à 115200 bauds
+    // (Note : Remplacer 0 et 1 par 12 et 13 si tu veux tester la liaison avec la Pi 5)
+    uart_init(uart0, 115200);
+    gpio_set_function(0, GPIO_FUNC_UART);
+    gpio_set_function(1, GPIO_FUNC_UART);
+
+    while (true) {
+        uart_puts(uart0, "TEST_OK\n");
+        sleep_ms(100);
+        
+        if (uart_is_readable(uart0)) {
+            printf("Donnee recue sur RX: ");
+            while (uart_is_readable(uart0)) {
+                putchar(uart_getc(uart0)); // Affiche chaque caractère reçu
+            }
+            printf("\n");
+        } else {
+            printf("ERREUR : Rien ne revient sur RX. TX est peut-etre mort ou RX est bloque.\n");
+        }
+        sleep_ms(1000);
+    }
+#endif
 
     // Préparation des "bâtons de parole"
     mutex_init(&mks_mutex);
@@ -373,16 +493,32 @@ int main()
     rmw_uros_set_custom_transport(true, NULL, pico_serial_transport_open, pico_serial_transport_close, pico_serial_transport_write, pico_serial_transport_read);
 
     // Initialisation des 3 capteurs optiques
+#if CALIBRATION_MODE > 0
+    // En mode calibration, on initialise tous les capteurs pour publier leurs données
     capteur1.init();
     capteur2.init();
     capteur3.init();
-
+#else // CALIBRATION_MODE == 0
+    capteur1.init();
+    capteur1.set_rotation(PAA5100::DEGREES_0);
+    capteur2.init();
+    capteur2.set_rotation(PAA5100::DEGREES_0);
+    capteur3.init();
+    capteur3.set_rotation(PAA5100::DEGREES_0);
+#endif
     // Lancement officiel du 2ème processeur (Le Cartographe)
     multicore_launch_core1(core1_entry);
 
     // Préparation des boîtes vides pour les messages
     geometry_msgs__msg__Point32__init(&cmd_vel_msg);
+#if CALIBRATION_MODE > 0
+    geometry_msgs__msg__Point32__init(&calib_msg1);
+    geometry_msgs__msg__Point32__init(&calib_msg2);
+    geometry_msgs__msg__Point32__init(&calib_msg3);
+#else
     geometry_msgs__msg__Point32__init(&odom_simple_msg);
+#endif
+    std_msgs__msg__Empty__init(&reset_odom_msg);
 
     set_rgb(1, 1, 0); // Jaune : En attente de l'Agent Micro-ROS
 
@@ -406,18 +542,43 @@ int main()
             {
                 mutex_enter_blocking(&odom_mutex); // On demande le bâton à notre Coeur 1
 #if CALIBRATION_MODE == 1
-                odom_simple_msg.x = calib_X;
-                odom_simple_msg.y = calib_Y;
-                odom_simple_msg.z = 0.0f; // La rotation n'est pas mesurée en calibration brute
+                calib_msg1.x = calib_X1;
+                calib_msg1.y = calib_Y1;
+                calib_msg1.z = 0.0f;
+
+                calib_msg2.x = calib_X2;
+                calib_msg2.y = calib_Y2;
+                calib_msg2.z = 0.0f;
+
+                calib_msg3.x = calib_X3;
+                calib_msg3.y = calib_Y3;
+                calib_msg3.z = 0.0f;
+#elif CALIBRATION_MODE == 2
+                calib_msg1.x = calib_mX1;
+                calib_msg1.y = calib_mY1;
+                calib_msg1.z = 0.0f;
+
+                calib_msg2.x = calib_mX2;
+                calib_msg2.y = calib_mY2;
+                calib_msg2.z = 0.0f;
+
+                calib_msg3.x = calib_mX3;
+                calib_msg3.y = calib_mY3;
+                calib_msg3.z = 0.0f;
 #else
                 odom_simple_msg.x = global_X;
                 odom_simple_msg.y = global_Y;
                 odom_simple_msg.z = global_Theta;
 #endif
                 mutex_exit(&odom_mutex);
-
                 // On envoie le message sur le réseau ROS !
+#if CALIBRATION_MODE > 0
+                rcl_publish(&calib_publisher1, &calib_msg1, NULL);
+                rcl_publish(&calib_publisher2, &calib_msg2, NULL);
+                rcl_publish(&calib_publisher3, &calib_msg3, NULL);
+#else
                 rcl_publish(&odom_simple_publisher, &odom_simple_msg, NULL);
+#endif
             }
         }
 

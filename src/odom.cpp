@@ -1,24 +1,49 @@
 /**
  * PROTOCOLE DE CALIBRATION DE L'ODOMÉTRIE (PAA5100 120°)
+ *
+ * L'objectif est de déterminer les constantes C1, C2, C3 qui convertissent les "ticks"
+ * bruts des capteurs en mètres.
+ *
  * * 1. PRÉPARATION :
- * - S'assurer que les constantes C1, C2, C3 sont à 0.001f (valeur par défaut).
- * - Lancer l'agent micro-ROS et écouter le topic :
- * 'ros2 topic echo /debug_sensors --field data'
- * * 2. CALIBRATION DES TRANSLATIONS (Coefficients C1, C2, C3) :
- * - Placer le robot sur une règle de 500 mm (0.5 m).
- * - Pousser le robot bien droit sur 500 mm.
- * - Relever la valeur affichée pour chaque capteur (data[1], data[3], data[5]).
- * - Calculer le nouveau coefficient pour chaque capteur :
- * C_nouveau = C_actuel * (0.50 / Valeur_Lue)
- * - Note : Si data[0, 2, 4] (axes radiaux) ne sont pas à 0, le capteur est physiquement mal aligné.
+ * - Dans `src/robot.cpp`, activer le mode de calibration :
+ *   `#define CALIBRATION_MODE 1`
+ * - Compiler et flasher le code sur le Pico.
+ * - Lancer l'agent micro-ROS et écouter les topics des capteurs :
+ *   `ros2 topic echo /pico/capteur1`
+ *   `ros2 topic echo /pico/capteur2`
+ *   `ros2 topic echo /pico/capteur3`
+ *
+ * * 2. CALIBRATION DES CONSTANTES DE CONVERSION (C1, C2, C3) :
+ * - Placer le robot sur une surface avec une bonne texture, le long d'une règle.
+ * - Remettre à zéro les compteurs de ticks en publiant sur le topic de reset :
+ *   `ros2 topic pub --once /pico/reset_odom std_msgs/msg/Empty`
+ * - Pousser le robot bien droit sur une distance connue, par exemple 500 mm (0.5 m).
+ *   Essayez de le pousser dans une direction qui maximise la lecture sur l'axe 'y'
+ *   de chaque capteur (mouvement tangentiel).
+ * - Relever la valeur finale des ticks accumulés pour chaque capteur (par exemple, `y` sur `/pico/capteur1`).
+ *   Soit `ticks_capteur1`, `ticks_capteur2`, `ticks_capteur3`.
+ *
+ * - Calculer les nouvelles constantes avec la formule directe :
+ *   `C1 = distance_reelle_en_metres / ticks_capteur1` (ex: 0.5 / 25000)
+ *   `C2 = distance_reelle_en_metres / ticks_capteur2`
+ *   `C3 = distance_reelle_en_metres / ticks_capteur3`
+ *
+ * - Inscrire ces nouvelles valeurs pour C1, C2, C3 dans ce fichier.
+ *
  * * 3. CALIBRATION DE LA ROTATION (R_ROBOT) :
- * - Une fois C1, C2, C3 réglés, faire pivoter le robot sur lui-même (10 tours).
- * - Observer 'global_Theta' sur le topic /odom.
- * - Si l'angle final n'est pas 0 (ou 62.83 rad), ajuster R_ROBOT :
- * R_nouveau = R_actuel * (Angle_Mesuré / Angle_Théorique)
+ * - Dans `src/robot.cpp`, repasser en mode normal : `#define CALIBRATION_MODE 0`
+ * - Compiler et flasher.
+ * - Faire pivoter le robot sur lui-même (ex: 10 tours complets, soit 62.83 radians).
+ * - Observer la valeur `z` (theta) sur le topic `/pico/odom_simple`.
+ * - Ajuster `R_ROBOT` avec la formule :
+ *   `R_nouveau = R_actuel * (Angle_Mesuré / Angle_Théorique)`
+ *
+ * * 4. FINALISATION :
+ * - Une fois les constantes calibrées, le robot est prêt.
  */
 #include <math.h>
 #include <stdint.h>
+#include "odom.hpp"
 
 // ==============================================================================
 // CONFIGURATION DE L'ODOMÉTRIE
@@ -29,7 +54,7 @@
 
 // Rayon géométrique du robot (distance entre le centre et les capteurs)
 // À AJUSTER : Met la valeur exacte de ta CAO (ex: 0.125 pour 12.5 cm)
-const float R_ROBOT = 0.125f;
+const float R_ROBOT = 0.145f;
 
 // Constantes trigonométriques pré-calculées pour la configuration 120°
 const float K1 = 1.0f / 3.0f;
@@ -37,13 +62,15 @@ const float K2 = 0.5f;
 const float K3 = sqrtf(3.0f) / 2.0f;
 const float KW = 1.0f / (3.0f * R_ROBOT);
 
-// Facteurs de conversion (Gains) : Millimètres par "tick" du capteur PAA15100.
-// À AJUSTER lors de tes tests sur la table pour compenser les micro-défauts d'impression 3D.
-// Si le capteur 1 compte trop de distance, diminue légèrement C1.
-float C1 = 0.001f; // Exemple : 1 tick = 1 mm (à calibrer !)
-float C2 = 0.001f;
-float C3 = 0.001f;
-
+// Inversion flags for sensor readings.
+// Set to 'true' if the sensor's reported displacement (dx or dy) needs to be
+// inverted to match the robot's coordinate system.
+bool invert_dx1 = false;
+bool invert_dy1 = false;
+bool invert_dx2 = false;
+bool invert_dy2 = false;
+bool invert_dx3 = false;
+bool invert_dy3 = false;
 // ==============================================================================
 // VARIABLES GLOBALES
 // ==============================================================================
@@ -66,19 +93,19 @@ float delta_Theta = 0.0f;
 void updateOdometry(int16_t dx1, int16_t dy1, int16_t dx2, int16_t dy2, int16_t dx3, int16_t dy3)
 {
     // 1. Conversion des ticks bruts en distances réelles
-    float mx1 = C1 * (float)dx1;
-    float my1 = C1 * (float)dy1;
-    float mx2 = C2 * (float)dx2;
-    float my2 = C2 * (float)dy2;
-    float mx3 = C3 * (float)dx3;
-    float my3 = C3 * (float)dy3;
+    float mx1 = C1 * (float)(invert_dx1 ? -dx1 : dx1);
+    float my1 = C1 * (float)(invert_dy1 ? -dy1 : dy1);
+    float mx2 = C2 * (float)(invert_dx2 ? -dx2 : dx2);
+    float my2 = C2 * (float)(invert_dy2 ? -dy2 : dy2);
+    float mx3 = C3 * (float)(invert_dx3 ? -dx3 : dx3);
+    float my3 = C3 * (float)(invert_dy3 ? -dy3 : dy3);
 
     // 2. Application de la matrice (Système 120°)
     delta_Xr = K1 * (mx1 - (K2 * mx2) - (K3 * my2) - (K2 * mx3) + (K3 * my3));
-    delta_Yr = K1 * (my1 + (K3 * mx2) - (K2 * my2) - (K3 * mx3) - (K2 * my3));
+    delta_Yr = K1 * (my1 + (K3 * mx2) - (K2 * my2) - (K3 * mx3) - (K2 * my3)); // Correction de la formule ici
     delta_Theta = KW * (my1 + my2 + my3);
 
-    // 3. Intégration Globale (Runge-Kutta 2)
+    // 4. Intégration Globale (Runge-Kutta 2)
     float theta_mid = global_Theta + (delta_Theta / 2.0f);
 
     global_X += (delta_Xr * cosf(theta_mid)) - (delta_Yr * sinf(theta_mid));
